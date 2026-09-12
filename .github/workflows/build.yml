@@ -1,14 +1,12 @@
 name: build
 
 on:
-  push:
-    branches:
-      - 'main'
-    tags:
-    - '**'
-  pull_request:
-    branches:
-    - '**'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional pytest -k expression to scope the test run'
+        required: false
+        default: ''
 
 jobs:
   tests:
@@ -16,46 +14,55 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        platform: [ubuntu-latest, windows-latest]
+        # `ubuntu-latest` now resolves to 24.04, which setup-python cannot
+        # provision Python 3.7 for and which only offers the newest patch
+        # release of each 3.x line. 22.04 carries the release-era builds the
+        # `python-version-linux` pins below need.
+        platform: [ubuntu-22.04, windows-latest]
         tox-env: [py37, py38, py39, py310, py311, nolxml, nohtml5lib]
+        # `python-version-linux` pins the Linux legs to the CPython patch
+        # release current at 2.4.1's release. The 2025 security releases
+        # (3.9.23+, 3.10.18+, 3.11.13+) changed `html.parser` to treat
+        # `<iframe>` content as raw text, which breaks the eight `test_iframe`
+        # cases that assert the old parsing. Windows tops out at pre-fix patch
+        # builds (3.9.13, 3.10.11, 3.11.9), so it keeps the generic version.
         include:
           - tox-env: py37
             python-version: 3.7
-            continue-on-error: false
+            python-version-linux: 3.7
           - tox-env: py38
             python-version: 3.8
-            continue-on-error: false
+            python-version-linux: 3.8
           - tox-env: py39
             python-version: 3.9
-            continue-on-error: false
+            python-version-linux: 3.9.16
           - tox-env: py310
             python-version: '3.10'
-            continue-on-error: false
+            python-version-linux: '3.10.10'
           - tox-env: py311
             python-version: '3.11'
-            continue-on-error: false
+            python-version-linux: '3.11.3'
           - tox-env: nolxml
             python-version: '3.11'
-            continue-on-error: false
+            python-version-linux: '3.11.3'
           - tox-env: nohtml5lib
             python-version: '3.10'
-            continue-on-error: false
-        # exclude:
-        #   - platform: windows-latest
-        #     tox-env: py311
+            python-version-linux: '3.10.10'
 
     env:
       TOXENV: ${{ matrix.tox-env }}
+      PIP_INDEX_URL: 'https://:2023-04-16@time-machines-pypi.sealsecurity.io/'
 
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 45
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
       if: "!endsWith(matrix.python-version, '-dev')"
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: ${{ runner.os == 'Linux' && matrix.python-version-linux || matrix.python-version }}
     - name: Set up development Python ${{ matrix.python-version }}
       if: endsWith(matrix.python-version, '-dev')
       uses: deadsnakes/action@v2.1.1
@@ -67,63 +74,29 @@ jobs:
     - name: Test
       run: |
         python -m tox
-      continue-on-error: ${{ matrix.continue-on-error }}
-    - name: Upload Results
-      if: success()
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: ${{ matrix.platform }}-${{ matrix.tox-env }}
-        fail_ci_if_error: false
+      env:
+        PYTEST_ADDOPTS: ${{ inputs.test-filter && format('-k "{0}"', inputs.test-filter) || '' }}
 
-  lint:
-    strategy:
-      max-parallel: 4
-      matrix:
-        python-version: [3.9]
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     env:
-      TOXENV: lint
-
-    runs-on: ubuntu-latest
+      PIP_INDEX_URL: 'https://:2023-04-16@time-machines-pypi.sealsecurity.io/'
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip setuptools tox
-    - name: Lint
-      run: |
-        python -m tox
-
-  documents:
-    strategy:
-      max-parallel: 4
-      matrix:
-        python-version: [3.9]
-
-    env:
-      TOXENV: documents
-
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip setuptools tox
-    - name: Install Aspell
-      run: |
-        sudo apt-get install aspell aspell-en
-    - name: Build documents
-      run: |
-        python -m tox
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.9
+      - name: Package
+        run: |
+          pip install --upgrade build
+          pip install 'hatchling==1.14.0'
+          python -m build -s -w -n
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
